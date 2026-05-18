@@ -97,7 +97,7 @@ app.post('/renew', (req, res) => {
     });
     
     // Return link to Vercel frontend
-    const newLink = `https://your-vercel-url.vercel.app/?token=${token}`;
+    const newLink = `https://omega-destroyer.vercel.app/?token=${token}`;
     res.json({ link: newLink });
 });
 
