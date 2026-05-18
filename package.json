@@ -1,0 +1,12 @@
+{
+  "name": "omega-key-api",
+  "version": "1.0.0",
+  "description": "Render webservice API for omega-key licensing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.4"
+  }
+}
