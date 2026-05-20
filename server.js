@@ -3,14 +3,16 @@ const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 
-const keys = new Map();
-const oneTimeTokens = new Map();
-const cooldown = new Map();
+// In-memory storage
+const keys = new Map();          // key -> { deviceId, expiresAt, type }
+const oneTimeTokens = new Map(); // token -> { deviceId, expiresAt }
+const cooldown = new Map();      // deviceId -> lastKeyGenerationTime
 
 function generateKey() {
     return crypto.randomBytes(16).toString('hex');
 }
 
+// Hardcoded premium keys (never expire)
 const PREMIUM_KEYS = [
     "p7f3a8d2c9e1b4f6a0c8e3d5b7f9a2c4",
     "p9c2e5b8a1d4f7c0e3a6b9d2f5c8e1b4",
@@ -30,11 +32,12 @@ PREMIUM_KEYS.forEach(key => {
 
 function createNormalKey(deviceId) {
     const key = generateKey();
-    const expiresAt = Date.now() + (6 * 60 * 60 * 1000);
+    const expiresAt = Date.now() + (6 * 60 * 60 * 1000); // 6 hours
     keys.set(key, { deviceId, expiresAt, type: 'normal' });
-    return key;
+    return { key, expiresAt };
 }
 
+// CORS for all endpoints
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -43,12 +46,28 @@ app.use((req, res, next) => {
     next();
 });
 
+// Health check
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', endpoints: '/validate, /generate-token, /generate-key, /health' });
+    res.json({ 
+        status: 'ok', 
+        keys: keys.size, 
+        tokens: oneTimeTokens.size,
+        cooldown: cooldown.size,
+        endpoints: '/health, /test, /validate, /generate-token, /generate-key'
+    });
 });
 
+// Simple test endpoint
+app.get('/test', (req, res) => {
+    res.json({ message: 'API is working', timestamp: new Date().toISOString() });
+});
+
+// Validate a key (for Game Guardian script)
 app.post('/validate', (req, res) => {
     const { key, deviceId } = req.body;
+    if (!key || !deviceId) {
+        return res.json({ valid: false, reason: 'missing_fields' });
+    }
     const record = keys.get(key);
     if (!record) return res.json({ valid: false, reason: 'invalid_key' });
     if (record.type === 'premium') return res.json({ valid: true, type: 'premium' });
@@ -57,67 +76,67 @@ app.post('/validate', (req, res) => {
     res.json({ valid: true, type: 'normal', expiresAt: record.expiresAt });
 });
 
+// Generate a one-time token (for Game Guardian to open Vercel)
 app.post('/generate-token', (req, res) => {
     const { deviceId } = req.body;
-    console.log('Generate token request for device:', deviceId);
-    
     if (!deviceId) {
         return res.status(400).json({ error: 'deviceId required' });
     }
-    
+    // Cooldown: 12 hours between key generations per device
     const lastGen = cooldown.get(deviceId);
     if (lastGen && (Date.now() - lastGen) < (12 * 60 * 60 * 1000)) {
         return res.status(429).json({ error: 'Cooldown active. Wait 12 hours.' });
     }
-    
     const token = crypto.randomBytes(32).toString('hex');
     oneTimeTokens.set(token, {
         deviceId: deviceId,
-        expiresAt: Date.now() + (60 * 60 * 1000)
+        expiresAt: Date.now() + (60 * 60 * 1000) // 1 hour expiry for token
     });
-    
-    console.log('Token generated:', token);
     res.json({ token: token });
 });
 
+// Exchange token for a real key (called from Vercel frontend)
 app.post('/generate-key', (req, res) => {
     const { token } = req.body;
-    console.log('Generate key request for token:', token);
-    
     if (!token) {
         return res.status(400).json({ error: 'token required' });
     }
-    
     const tokenData = oneTimeTokens.get(token);
-    if (!tokenData) {
-        return res.status(400).json({ error: 'Invalid token' });
+    if (!tokenData || Date.now() > tokenData.expiresAt) {
+        return res.status(400).json({ error: 'Invalid or expired token' });
     }
-    
-    if (Date.now() > tokenData.expiresAt) {
-        return res.status(400).json({ error: 'Token expired' });
-    }
-    
+    // Check cooldown again before generating key
     const lastGen = cooldown.get(tokenData.deviceId);
     if (lastGen && (Date.now() - lastGen) < (12 * 60 * 60 * 1000)) {
         return res.status(429).json({ error: 'Cooldown active. Wait 12 hours.' });
     }
-    
-    const newKey = createNormalKey(tokenData.deviceId);
-    const expiresAt = Date.now() + (6 * 60 * 60 * 1000);
+    const { key, expiresAt } = createNormalKey(tokenData.deviceId);
+    // Set cooldown for this device
     cooldown.set(tokenData.deviceId, Date.now());
+    // Delete used token
     oneTimeTokens.delete(token);
-    
-    console.log('Key generated:', newKey);
-    res.json({ key: newKey, expiresAt: expiresAt });
+    res.json({ key: key, expiresAt: expiresAt });
 });
 
-app.get('/test', (req, res) => {
-    res.json({ message: 'API is working', time: new Date().toISOString() });
+// Admin: Add a new premium key (optional, for your own use)
+app.post('/add-premium', (req, res) => {
+    const { adminSecret, customKey } = req.body;
+    if (adminSecret !== 'your_admin_secret_123') {
+        return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const newKey = customKey || generateKey();
+    keys.set(newKey, { deviceId: null, expiresAt: null, type: 'premium' });
+    res.json({ key: newKey, type: 'premium', expires: 'never' });
+});
+
+// For debugging: list all active tokens (admin only)
+app.get('/debug/tokens', (req, res) => {
+    const tokensList = Array.from(oneTimeTokens.entries()).map(([t, d]) => ({ token: t, ...d }));
+    res.json({ tokens: tokensList });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`API running on port ${PORT}`);
-    console.log(`Health check: https://omega-key.onrender.com/health`);
-    console.log(`Test endpoint: https://omega-key.onrender.com/test`);
+    console.log(`Omega API running on port ${PORT}`);
+    console.log(`Health: https://omega-key.onrender.com/health (replace with your actual domain)`);
 });
