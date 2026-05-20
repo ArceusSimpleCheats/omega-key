@@ -44,7 +44,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok' });
+    res.json({ status: 'ok', endpoints: '/validate, /generate-token, /generate-key, /health' });
 });
 
 app.post('/validate', (req, res) => {
@@ -59,34 +59,65 @@ app.post('/validate', (req, res) => {
 
 app.post('/generate-token', (req, res) => {
     const { deviceId } = req.body;
+    console.log('Generate token request for device:', deviceId);
+    
+    if (!deviceId) {
+        return res.status(400).json({ error: 'deviceId required' });
+    }
+    
     const lastGen = cooldown.get(deviceId);
     if (lastGen && (Date.now() - lastGen) < (12 * 60 * 60 * 1000)) {
         return res.status(429).json({ error: 'Cooldown active. Wait 12 hours.' });
     }
+    
     const token = crypto.randomBytes(32).toString('hex');
     oneTimeTokens.set(token, {
         deviceId: deviceId,
         expiresAt: Date.now() + (60 * 60 * 1000)
     });
+    
+    console.log('Token generated:', token);
     res.json({ token: token });
 });
 
 app.post('/generate-key', (req, res) => {
     const { token } = req.body;
-    const tokenData = oneTimeTokens.get(token);
-    if (!tokenData || Date.now() > tokenData.expiresAt) {
-        return res.status(400).json({ error: 'Invalid or expired token' });
+    console.log('Generate key request for token:', token);
+    
+    if (!token) {
+        return res.status(400).json({ error: 'token required' });
     }
+    
+    const tokenData = oneTimeTokens.get(token);
+    if (!tokenData) {
+        return res.status(400).json({ error: 'Invalid token' });
+    }
+    
+    if (Date.now() > tokenData.expiresAt) {
+        return res.status(400).json({ error: 'Token expired' });
+    }
+    
     const lastGen = cooldown.get(tokenData.deviceId);
     if (lastGen && (Date.now() - lastGen) < (12 * 60 * 60 * 1000)) {
         return res.status(429).json({ error: 'Cooldown active. Wait 12 hours.' });
     }
+    
     const newKey = createNormalKey(tokenData.deviceId);
     const expiresAt = Date.now() + (6 * 60 * 60 * 1000);
     cooldown.set(tokenData.deviceId, Date.now());
     oneTimeTokens.delete(token);
+    
+    console.log('Key generated:', newKey);
     res.json({ key: newKey, expiresAt: expiresAt });
 });
 
+app.get('/test', (req, res) => {
+    res.json({ message: 'API is working', time: new Date().toISOString() });
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('API running'));
+app.listen(PORT, () => {
+    console.log(`API running on port ${PORT}`);
+    console.log(`Health check: https://omega-key.onrender.com/health`);
+    console.log(`Test endpoint: https://omega-key.onrender.com/test`);
+});
